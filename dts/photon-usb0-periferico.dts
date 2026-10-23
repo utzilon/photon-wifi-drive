@@ -1,0 +1,37 @@
+/*
+ * El USB0 de la Orange Pi H616/H618 (usb@5100000, el USB-C por el que también
+ * se alimenta la tarjeta) como periférico: así la impresora la ve como una
+ * memoria USB. El sistema de Orange Pi lo puede traer como host; este overlay
+ * lo deja como periférico pase lo que pase, porque se aplica al final.
+ *
+ * Lo compila e instala instalar.sh en /boot/overlay-user/.
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "allwinner,sun50i-h616", "allwinner,sun50i-h618";
+
+	fragment@0 {
+		target = <&usbotg>;
+		__overlay__ {
+			dr_mode = "peripheral";
+			status = "okay";
+		};
+	};
+
+	/* Como host, el USB0 usa estos dos controladores; como periférico, no. */
+	fragment@1 {
+		target = <&ehci0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@2 {
+		target = <&ohci0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+};

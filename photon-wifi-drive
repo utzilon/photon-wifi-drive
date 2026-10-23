@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# La tarjeta se presenta en el USB como una memoria: un gadget USB de
+# almacenamiento masivo (configfs + libcomposite) cuyo disco es la imagen FAT
+# de /etc/photon-wifi-drive.conf.
+#
+#   photon-wifi-drive conectar      la impresora ve la memoria (como meterla)
+#   photon-wifi-drive desconectar   la impresora deja de verla (como sacarla)
+#   photon-wifi-drive estado        cómo está el USB0 y qué ve la impresora
+set -euo pipefail
+
+CONF=/etc/photon-wifi-drive.conf
+# shellcheck source=photon-wifi-drive.conf
+[ -r "$CONF" ] && . "$CONF"
+IMAGEN="${IMAGEN:-/var/lib/photon-wifi-drive/disco.img}"
+
+GADGET=/sys/kernel/config/usb_gadget/photon-wifi-drive
+MEMORIA="$GADGET/functions/mass_storage.0"
+
+falla() { echo "photon-wifi-drive: $*" >&2; exit 1; }
+
+# El controlador USB en modo periférico (en la Orange Pi, musb-hdrc.N.auto).
+# Al arrancar tarda un poco en aparecer.
+controlador() {
+	local udc
+	for _ in $(seq 20); do
+		for udc in /sys/class/udc/*; do
+			if [ -e "$udc" ]; then basename "$udc"; return 0; fi
+		done
+		sleep 0.5
+	done
+	return 1
+}
+
+# Arma el gadget una sola vez: un aparato USB con una configuración y, dentro,
+# la memoria. Lo que se escribe antes de enlazar la función a la configuración
+# ya no se puede cambiar después.
+armar() {
+	[ -d "$GADGET" ] && return 0
+	modprobe libcomposite
+	mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+	mkdir "$GADGET"
+	echo 0x1d6b > "$GADGET/idVendor"    # Linux Foundation
+	echo 0x0104 > "$GADGET/idProduct"   # Multifunction Composite Gadget
+	echo 0x0100 > "$GADGET/bcdDevice"
+	echo 0x0200 > "$GADGET/bcdUSB"
+	mkdir "$GADGET/strings/0x409"
+	echo "UtzilOn" > "$GADGET/strings/0x409/manufacturer"
+	echo "Photon WiFi Drive" > "$GADGET/strings/0x409/product"
+	# El número de serie, como pide la norma de memorias USB: 0-9 y A-F.
+	head -c 16 /etc/machine-id | tr a-f A-F > "$GADGET/strings/0x409/serialnumber"
+	mkdir -p "$GADGET/configs/c.1/strings/0x409"
+	echo "Memoria" > "$GADGET/configs/c.1/strings/0x409/configuration"
+	echo 500 > "$GADGET/configs/c.1/MaxPower"
+	mkdir "$MEMORIA"
+	# Sin detener los extremos del bus (stall=0): es como mejor lo toman los USB
+	# sencillos, como el de una impresora.
+	echo 0 > "$MEMORIA/stall"
+	# Removible, como una memoria de verdad: así se puede sacar y meter.
+	echo 1 > "$MEMORIA/lun.0/removable"
+	ln -s "$MEMORIA" "$GADGET/configs/c.1/"
+}
+
+conectar() {
+	[ -f "$IMAGEN" ] || falla "no existe la imagen $IMAGEN (la crea instalar.sh)"
+	armar
+	[ -z "$(cat "$GADGET/UDC")" ] || return 0
+	echo "$IMAGEN" > "$MEMORIA/lun.0/file"
+	local udc
+	udc=$(controlador) || falla "no hay USB en modo periférico: ¿ya se reinició la tarjeta después de instalar?"
+	echo "$udc" > "$GADGET/UDC"
+}
+
+desconectar() {
+	[ -d "$GADGET" ] || return 0
+	[ -z "$(cat "$GADGET/UDC")" ] || echo "" > "$GADGET/UDC"
+}
+
+estado() {
+	local nodo modo="?" udc
+	if [ -e /proc/device-tree/__symbols__/usbotg ]; then
+		nodo=/proc/device-tree$(tr -d '\0' < /proc/device-tree/__symbols__/usbotg)
+		[ -e "$nodo/dr_mode" ] && modo=$(tr -d '\0' < "$nodo/dr_mode")
+	fi
+	echo "USB0: $modo"
+	if [ ! -d "$GADGET" ] || [ -z "$(cat "$GADGET/UDC")" ]; then
+		echo "memoria: desconectada"
+		return 0
+	fi
+	udc=$(cat "$GADGET/UDC")
+	# configured = la impresora ya la reconoció como memoria
+	echo "memoria: conectada en $udc ($(cat "/sys/class/udc/$udc/state"))"
+	echo "imagen: $(cat "$MEMORIA/lun.0/file")"
+}
+
+case "${1:-}" in
+	conectar|desconectar)
+		[ "$(id -u)" = 0 ] || falla "va con sudo"
+		"$1" ;;
+	estado) estado ;;
+	*) echo "uso: photon-wifi-drive conectar|desconectar|estado" >&2; exit 2 ;;
+esac

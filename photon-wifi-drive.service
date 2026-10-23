@@ -1,0 +1,12 @@
+[Unit]
+Description=photon-wifi-drive: la tarjeta como memoria USB de la impresora
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/photon-wifi-drive conectar
+ExecStop=/usr/local/sbin/photon-wifi-drive desconectar
+
+[Install]
+WantedBy=multi-user.target
