@@ -10,9 +10,11 @@ Photon M3 Max.
   periférico con un overlay del device tree.
 - Un gadget USB de almacenamiento masivo (configfs + libcomposite) le presenta
   a la impresora una imagen FAT32 como si fuera una memoria.
+- La tarjeta comparte una carpeta por la red (Samba). Cuando llega un archivo
+  y la copia termina, la tarjeta saca la memoria, la pone igual que la carpeta
+  y la vuelve a meter, para que la impresora vea lo nuevo. Lo mismo al borrar.
 
-En camino: compartir una carpeta por la red (Samba) y, cuando llegue un archivo
-nuevo, simular que se saca y se mete la memoria para que la impresora lo vea.
+La carpeta es la que manda: lo que no esté en ella desaparece de la memoria.
 
 ## Lo que se necesita
 
@@ -35,10 +37,11 @@ nuevo, simular que se saca y se mete la memoria para que la impresora lo vea.
        cd photon-wifi-drive
        sudo ./instalar.sh
 
-   instalar.sh pone el USB0 como periférico, crea la memoria (4 GB, FAT32,
-   etiqueta `PHOTON`) en `/var/lib/photon-wifi-drive/disco.img` y deja un
-   servicio que la conecta al arrancar. Para otro tamaño o etiqueta, se edita
-   `photon-wifi-drive.conf` antes de correrlo.
+   instalar.sh pide la clave de la carpeta de la red (usuario `photon`). Pone
+   el USB0 como periférico, crea la memoria (4 GB, FAT32, etiqueta `PHOTON`),
+   comparte la carpeta y deja un servicio que conecta la memoria al arrancar.
+   Para otro tamaño o etiqueta, se edita `photon-wifi-drive.conf` antes de
+   correrlo.
 
 3. Reiniciar y revisar:
 
@@ -57,18 +60,15 @@ nuevo, simular que se saca y se mete la memoria para que la impresora lo vea.
 Por SSH, `photon-wifi-drive estado` dice `configured` cuando la impresora ya la
 reconoció.
 
-## Poner un archivo a mano
+## Mandarle archivos
 
-Mientras llega la carpeta por la red, un archivo se mete así (por ejemplo, uno
-que se pasó antes a la tarjeta con `scp`):
+Desde la PC se abre la carpeta `\\<ip de la tarjeta>\photon` (la IP la da
+`hostname -I` en la tarjeta), con el usuario `photon` y la clave de la
+instalación. Se copia el archivo (por ejemplo, el `.pwmb` de Photon Workshop) y,
+unos segundos después de que termina la copia, la impresora lo ve.
 
-    sudo photon-wifi-drive desconectar
-    sudo mount -o loop,offset=1048576 /var/lib/photon-wifi-drive/disco.img /mnt
-    sudo cp prueba.pwmb /mnt/
-    sudo umount /mnt
-    sudo photon-wifi-drive conectar
-
-La impresora lo ve cuando la memoria se vuelve a conectar.
+Lo que tenga la carpeta no debe pasar del tamaño de la memoria (4 GB). La clave
+se cambia con `sudo smbpasswd photon`.
 
 ## Comandos
 
@@ -77,6 +77,8 @@ La impresora lo ve cuando la memoria se vuelve a conectar.
 | `sudo photon-wifi-drive conectar` | La impresora ve la memoria (como meterla). |
 | `sudo photon-wifi-drive desconectar` | La impresora deja de verla (como sacarla). |
 | `photon-wifi-drive estado` | Cómo está el USB0 y qué ve la impresora. |
+
+Lo que hace el servicio queda en `journalctl -u photon-wifi-drive`.
 
 ## Licencia
 

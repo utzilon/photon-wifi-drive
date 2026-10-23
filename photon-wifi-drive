@@ -1,22 +1,33 @@
 #!/usr/bin/env bash
 # La tarjeta se presenta en el USB como una memoria: un gadget USB de
 # almacenamiento masivo (configfs + libcomposite) cuyo disco es la imagen FAT
-# de /etc/photon-wifi-drive.conf.
+# de /etc/photon-wifi-drive.conf. Lo que tenga la carpeta de la red (Samba) es
+# lo que la impresora ve en la memoria.
 #
 #   photon-wifi-drive conectar      la impresora ve la memoria (como meterla)
 #   photon-wifi-drive desconectar   la impresora deja de verla (como sacarla)
 #   photon-wifi-drive estado        cómo está el USB0 y qué ve la impresora
+#   photon-wifi-drive vigilar       lo corre el servicio (ver vigilar())
 set -euo pipefail
 
 CONF=/etc/photon-wifi-drive.conf
 # shellcheck source=photon-wifi-drive.conf
 [ -r "$CONF" ] && . "$CONF"
 IMAGEN="${IMAGEN:-/var/lib/photon-wifi-drive/disco.img}"
+CARPETA="${CARPETA:-/srv/photon-wifi-drive}"
 
 GADGET=/sys/kernel/config/usb_gadget/photon-wifi-drive
 MEMORIA="$GADGET/functions/mass_storage.0"
+# La partición FAT empieza en el primer MiB de la imagen (la crea instalar.sh).
+INICIO=1048576
+# Segundos sin cambios en la carpeta para dar por terminada una copia.
+QUIETO=5
 
 falla() { echo "photon-wifi-drive: $*" >&2; exit 1; }
+
+# Un cambio a la vez: el servicio y los comandos a mano no se pisan.
+candado() { exec 9> /run/photon-wifi-drive.lock; flock 9; }
+soltar() { flock -u 9; }
 
 # El controlador USB en modo periférico (en la Orange Pi, musb-hdrc.N.auto).
 # Al arrancar tarda un poco en aparecer.
@@ -75,6 +86,62 @@ desconectar() {
 	[ -z "$(cat "$GADGET/UDC")" ] || echo "" > "$GADGET/UDC"
 }
 
+# Deja la memoria igual que la carpeta. Va con la memoria fuera del USB, y antes
+# pasa fsck: la impresora apaga la tarjeta de golpe, y si fue a media copia la
+# memoria pudo quedar a medias.
+sincronizar() {
+	local loop punto r=0
+	loop=$(losetup -f --show -o "$INICIO" "$IMAGEN") || return 1
+	fsck.vfat -a "$loop" > /dev/null || [ $? -eq 1 ] || echo "fsck no pudo dejar bien la memoria" >&2
+	punto=$(mktemp -d)
+	if mount -t vfat -o tz=UTC,utf8 "$loop" "$punto"; then
+		# 24: un archivo se borró mientras se copiaba; va en la siguiente vuelta.
+		rsync -rt --modify-window=1 --delete "$CARPETA/" "$punto/" || [ $? -eq 24 ] || r=1
+		umount "$punto" || r=1
+	else
+		r=1
+	fi
+	rmdir "$punto" 2> /dev/null || r=1
+	losetup -d "$loop" || r=1
+	sync "$IMAGEN"
+	return $r
+}
+
+# Sacar la memoria, ponerla al día y volverla a meter: así la impresora la lee
+# de nuevo y ve lo que llegó.
+reconectar() {
+	desconectar
+	if sincronizar; then
+		echo "memoria al día con la carpeta"
+	else
+		echo "no se pudo copiar todo a la memoria (¿no cabe?)" >&2
+	fi
+	conectar
+}
+
+# Lo corre el servicio. Al arrancar deja la memoria igual que la carpeta y la
+# conecta. Después, cada vez que la carpeta cambia y se queda quieta QUIETO
+# segundos (la copia por la red ya terminó), la vuelve a sacar y meter.
+vigilar() {
+	local pendiente=0
+	inotifywait -m -r -q -e modify,close_write,create,delete,moved_to,moved_from --format '%e' "$CARPETA" | {
+		candado; reconectar; soltar
+		while :; do
+			if read -r -t "$QUIETO" _; then
+				pendiente=1
+			elif [ $? -gt 128 ]; then
+				if [ $pendiente = 1 ]; then
+					pendiente=0
+					echo "cambió la carpeta: saco la memoria, la pongo al día y la vuelvo a meter"
+					candado; reconectar; soltar
+				fi
+			else
+				falla "se dejó de vigilar la carpeta"
+			fi
+		done
+	}
+}
+
 estado() {
 	local nodo modo="?" udc
 	if [ -e /proc/device-tree/__symbols__/usbotg ]; then
@@ -95,7 +162,11 @@ estado() {
 case "${1:-}" in
 	conectar|desconectar)
 		[ "$(id -u)" = 0 ] || falla "va con sudo"
+		candado
 		"$1" ;;
+	vigilar)
+		[ "$(id -u)" = 0 ] || falla "va con sudo"
+		vigilar ;;
 	estado) estado ;;
 	*) echo "uso: photon-wifi-drive conectar|desconectar|estado" >&2; exit 2 ;;
 esac

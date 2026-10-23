@@ -24,10 +24,13 @@ faltan=()
 command -v dtc >/dev/null || faltan+=(device-tree-compiler)
 command -v mkfs.vfat >/dev/null || faltan+=(dosfstools)
 command -v sfdisk >/dev/null || faltan+=(fdisk)
+command -v smbd >/dev/null || faltan+=(samba)
+command -v inotifywait >/dev/null || faltan+=(inotify-tools)
+command -v rsync >/dev/null || faltan+=(rsync)
 if [ ${#faltan[@]} -gt 0 ]; then
 	echo "instalando ${faltan[*]}…"
 	apt-get update -qq
-	apt-get install -y -qq "${faltan[@]}" >/dev/null
+	DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${faltan[@]}" >/dev/null
 fi
 
 # El kernel tiene que saber poner el USB0 como periférico y armar memorias por
@@ -66,6 +69,30 @@ install -m 755 "$AQUI/photon-wifi-drive" /usr/local/sbin/photon-wifi-drive
 install -m 644 "$AQUI/photon-wifi-drive.service" /etc/systemd/system/photon-wifi-drive.service
 # shellcheck source=photon-wifi-drive.conf
 . /etc/photon-wifi-drive.conf
+CARPETA="${CARPETA:-/srv/photon-wifi-drive}"
+
+# La carpeta de la red: Samba con el usuario photon. Windows ya no deja entrar
+# a carpetas sin usuario y clave.
+id photon >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin photon
+install -d -o photon -g photon "$CARPETA"
+if ! pdbedit -L 2>/dev/null | grep -q '^photon:'; then
+	clave=""
+	read -r -s -p "clave para entrar a la carpeta (usuario photon): " clave || true
+	echo
+	[ -n "$clave" ] || falla "hace falta una clave para la carpeta"
+	printf '%s\n%s\n' "$clave" "$clave" | smbpasswd -s -a photon >/dev/null
+fi
+if ! grep -q '^\[photon\]' /etc/samba/smb.conf; then
+	cat >> /etc/samba/smb.conf <<EOF
+
+# La agregó photon-wifi-drive: lo que se copie aquí lo ve la impresora.
+[photon]
+   path = $CARPETA
+   valid users = photon
+   read only = no
+EOF
+fi
+systemctl restart smbd
 
 # La memoria, como una de fábrica: tabla de particiones MBR y una sola
 # partición FAT32 desde el primer MiB.
